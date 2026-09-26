@@ -14,3 +14,6 @@ Telegram-first business management bot.
 /client Имя, контакт
 
 Built for Railway.
+
+
+Build fixes applied.
