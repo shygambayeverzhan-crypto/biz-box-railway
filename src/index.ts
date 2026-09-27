@@ -1,167 +1,340 @@
 import 'dotenv/config';
-import { Telegraf, Markup } from 'telegraf';
+import { Telegraf, Markup, session } from 'telegraf';
 import pg from 'pg';
 
 const { Pool } = pg;
+
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
+const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID;
 
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN is not configured');
 if (!DATABASE_URL) throw new Error('DATABASE_URL is not configured');
 
 const bot = new Telegraf(BOT_TOKEN);
-const pool = new Pool({ connectionString: DATABASE_URL, ssl: DATABASE_URL.includes('railway') ? { rejectUnauthorized:false } : undefined });
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: DATABASE_URL.includes('railway') ? { rejectUnauthorized: false } : undefined
+});
 
-async function db(sql:string, params:any[]=[]){ return pool.query(sql, params); }
+type SessionData = {
+  step?: 'service' | 'description' | 'phone';
+  service?: string;
+  description?: string;
+};
 
-async function initDb(){
+async function db(sql: string, params: any[] = []) {
+  return pool.query(sql, params);
+}
+
+async function initDb() {
   await db(`
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS service_users (
       id BIGSERIAL PRIMARY KEY,
       telegram_id BIGINT UNIQUE NOT NULL,
       username TEXT,
       first_name TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW()
+      last_name TEXT,
+      phone TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
     );
-    CREATE TABLE IF NOT EXISTS transactions (
+
+    CREATE TABLE IF NOT EXISTS service_leads (
       id BIGSERIAL PRIMARY KEY,
       telegram_id BIGINT NOT NULL,
-      type TEXT NOT NULL CHECK (type IN ('income','expense')),
-      amount NUMERIC(14,2) NOT NULL,
+      username TEXT,
+      first_name TEXT,
+      phone TEXT,
+      service TEXT NOT NULL,
       description TEXT DEFAULT '',
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS tasks (
-      id BIGSERIAL PRIMARY KEY,
-      telegram_id BIGINT NOT NULL,
-      title TEXT NOT NULL,
-      done BOOLEAN DEFAULT FALSE,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS clients (
-      id BIGSERIAL PRIMARY KEY,
-      telegram_id BIGINT NOT NULL,
-      name TEXT NOT NULL,
-      contact TEXT DEFAULT '',
+      status TEXT DEFAULT 'new',
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
 }
 
-async function ensureUser(ctx:any){
-  const u=ctx.from;
+async function ensureUser(ctx: any) {
+  const u = ctx.from;
   await db(
-    'INSERT INTO users (telegram_id,username,first_name) VALUES ($1,$2,$3) ON CONFLICT (telegram_id) DO UPDATE SET username=EXCLUDED.username, first_name=EXCLUDED.first_name',
-    [u.id,u.username??null,u.first_name??'']
+    `INSERT INTO service_users (telegram_id, username, first_name, last_name)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (telegram_id) DO UPDATE SET
+       username=EXCLUDED.username,
+       first_name=EXCLUDED.first_name,
+       last_name=EXCLUDED.last_name,
+       updated_at=NOW()`,
+    [u.id, u.username ?? null, u.first_name ?? '', u.last_name ?? null]
   );
 }
 
-const menu = () => Markup.inlineKeyboard([
-  [Markup.button.callback('💰 Финансы','finance'),Markup.button.callback('✅ Задачи','tasks')],
-  [Markup.button.callback('👥 Клиенты','clients'),Markup.button.callback('📊 Аналитика','analytics')],
-  [Markup.button.callback('🤖 AI-помощник','ai'),Markup.button.callback('⚙️ Настройки','settings')],
+const mainMenu = () => Markup.inlineKeyboard([
+  [Markup.button.callback('🔥 Мои услуги', 'services')],
+  [Markup.button.callback('💼 Заказать услугу', 'order')],
+  [Markup.button.callback('👤 Обо мне', 'about')],
+  [Markup.button.callback('💬 Связаться со мной', 'contact')]
 ]);
 
-bot.start(async ctx=>{
+const servicesMenu = () => Markup.inlineKeyboard([
+  [Markup.button.callback('🎬 Reels / Мобилография', 'svc_reels')],
+  [Markup.button.callback('📱 SMM', 'svc_smm')],
+  [Markup.button.callback('🤖 Telegram-боты', 'svc_bots')],
+  [Markup.button.callback('🌐 Создание сайтов', 'svc_sites')],
+  [Markup.button.callback('🎯 Таргет', 'svc_target')],
+  [Markup.button.callback('✍️ Сценарии / Контент', 'svc_content')],
+  [Markup.button.callback('🎥 Продакшн под ключ', 'svc_prod')],
+  [Markup.button.callback('💼 Комплексное продвижение', 'svc_full')],
+  [Markup.button.callback('⬅️ Назад', 'home')]
+]);
+
+const backMenu = () => Markup.inlineKeyboard([
+  [Markup.button.callback('🔥 Все услуги', 'services')],
+  [Markup.button.callback('💼 Заказать', 'order')],
+  [Markup.button.callback('⬅️ Назад', 'home')]
+]);
+
+const serviceData: Record<string, { title: string; text: string }> = {
+  reels: {
+    title: '🎬 REELS / МОБИЛОГРАФИЯ',
+    text: 'Съёмка и монтаж коротких вертикальных видео для Instagram, TikTok и Shorts.\\n\\n📦 Пакет: 12 Reels — 100 000 ₸\\n\\nВключает съёмку, монтаж, цвет, звук и адаптацию под соцсети.'
+  },
+  smm: {
+    title: '📱 SMM',
+    text: 'Контент и продвижение соцсетей: стратегия, контент-план, Reels, оформление и работа с аудиторией.\\n\\n💰 Консультация по продвижению личного бренда — 25 000 ₸.'
+  },
+  bots: {
+    title: '🤖 TELEGRAM-БОТЫ',
+    text: 'Создание Telegram-ботов для продаж, заявок, автоматизации и клиентского сервиса.\\n\\n💰 Стоимость — от 50 000 ₸, зависит от функционала.'
+  },
+  sites: {
+    title: '🌐 СОЗДАНИЕ САЙТОВ',
+    text: 'Лендинги, сайты-визитки и веб-приложения под бизнес или личный бренд.\\n\\n💰 Стоимость — от 70 000 ₸.'
+  },
+  target: {
+    title: '🎯 ТАРГЕТ',
+    text: 'Настройка и ведение рекламы в Meta: аудитория, креативы, запуск, аналитика и оптимизация.\\n\\n💰 Настройка — 80 000 ₸.'
+  },
+  content: {
+    title: '✍️ СЦЕНАРИИ / КОНТЕНТ',
+    text: 'Сценарии для Reels, TikTok, рекламных роликов, Threads и коротких сериалов.\\n\\n💰 Стоимость рассчитывается под задачу.'
+  },
+  prod: {
+    title: '🎥 ПРОДАКШН ПОД КЛЮЧ',
+    text: 'Полный цикл: идея → сценарий → съёмка → монтаж → звук → публикация.\\n\\nПодходит брендам, экспертам, заведениям и бизнесу.'
+  },
+  full: {
+    title: '💼 КОМПЛЕКСНОЕ ПРОДВИЖЕНИЕ',
+    text: 'Объединяем контент, SMM, рекламу и автоматизацию в одну систему продвижения.\\n\\nФормат и бюджет подбираются после короткого брифа.'
+  }
+};
+
+function serviceKeyFromAction(action: string) {
+  return action.replace('svc_', '');
+}
+
+bot.use(session());
+
+bot.start(async ctx => {
   await ensureUser(ctx);
+  const u = ctx.from;
+  const username = u.username ? `@${u.username}` : 'username не указан';
+
   await ctx.reply(
-    '🚀 BIZBOX\\n\\nУправляй. Развивай. Действуй.\\n\\nБизнес прямо в Telegram — финансы, задачи, клиенты и аналитика в одном месте.',
-    menu()
+    `👋 Привет, ${u.first_name}!
+
+Я бот Ержана. Здесь можно быстро посмотреть мои услуги, выбрать нужную и оставить заявку.
+
+👤 Твой Telegram: ${username}
+
+Никаких форм и длинных анкет — всё прямо в чате.`,
+    mainMenu()
   );
 });
 
-bot.command('menu',async ctx=>{ await ensureUser(ctx); await ctx.reply('🚀 Главное меню',menu()); });
-
-bot.command('income',async ctx=>{
+bot.command('menu', async ctx => {
   await ensureUser(ctx);
-  const text=ctx.message.text.replace(/^\\/income\\s*/,'').trim();
-  const m=text.match(/^(\\d+(?:[.,]\\d+)?)\\s*(.*)$/);
-  if(!m) return ctx.reply('Формат: /income 50000 Продажа');
-  await db('INSERT INTO transactions (telegram_id,type,amount,description) VALUES ($1,\'income\',$2,$3)',[ctx.from.id,Number(m[1].replace(',','.')),m[2]]);
-  return ctx.reply('✅ Доход добавлен.');
+  await ctx.reply('🚀 Главное меню', mainMenu());
 });
 
-bot.command('expense',async ctx=>{
-  await ensureUser(ctx);
-  const text=ctx.message.text.replace(/^\\/expense\\s*/,'').trim();
-  const m=text.match(/^(\\d+(?:[.,]\\d+)?)\\s*(.*)$/);
-  if(!m) return ctx.reply('Формат: /expense 12000 Реклама');
-  await db('INSERT INTO transactions (telegram_id,type,amount,description) VALUES ($1,\'expense\',$2,$3)',[ctx.from.id,Number(m[1].replace(',','.')),m[2]]);
-  return ctx.reply('✅ Расход добавлен.');
+bot.command('id', async ctx => {
+  await ctx.reply(`Твой Telegram ID: ${ctx.from.id}`);
 });
 
-bot.command('task',async ctx=>{
-  await ensureUser(ctx);
-  const title=ctx.message.text.replace(/^\\/task\\s*/,'').trim();
-  if(!title) return ctx.reply('Формат: /task Позвонить клиенту');
-  await db('INSERT INTO tasks (telegram_id,title) VALUES ($1,$2)',[ctx.from.id,title]);
-  return ctx.reply('✅ Задача добавлена.');
-});
-
-bot.command('client',async ctx=>{
-  await ensureUser(ctx);
-  const text=ctx.message.text.replace(/^\\/client\\s*/,'').trim();
-  if(!text) return ctx.reply('Формат: /client Имя, контакт');
-  const [name,...rest]=text.split(',');
-  await db('INSERT INTO clients (telegram_id,name,contact) VALUES ($1,$2,$3)',[ctx.from.id,name.trim(),rest.join(',').trim()]);
-  return ctx.reply('✅ Клиент добавлен.');
-});
-
-bot.action('finance',async ctx=>{
-  await ensureUser(ctx);
-  const r=await db('SELECT COALESCE(SUM(amount) FILTER (WHERE type=\'income\'),0) income, COALESCE(SUM(amount) FILTER (WHERE type=\'expense\'),0) expense FROM transactions WHERE telegram_id=$1',[ctx.from.id]);
-  const income=Number(r.rows[0].income), expense=Number(r.rows[0].expense);
+bot.action('home', async ctx => {
   await ctx.answerCbQuery();
-  await ctx.editMessageText(`💰 ФИНАНСЫ\\n\\n📈 Доход: ${income.toLocaleString('ru-RU')} ₸\\n📉 Расход: ${expense.toLocaleString('ru-RU')} ₸\\n💵 Баланс: ${(income-expense).toLocaleString('ru-RU')} ₸\\n\\nДобавить быстро:\\n/income 50000 Продажа\\n/expense 12000 Реклама`,menu());
+  await ctx.editMessageText('🚀 Главное меню', mainMenu());
 });
 
-bot.action('tasks',async ctx=>{
-  await ensureUser(ctx);
-  const r=await db('SELECT id,title,done FROM tasks WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 10',[ctx.from.id]);
-  const lines=r.rows.length?r.rows.map((x:any)=>`${x.done?'☑️':'⬜'} ${x.title}`):['Пока задач нет.'];
+bot.action('services', async ctx => {
   await ctx.answerCbQuery();
-  await ctx.editMessageText('✅ ЗАДАЧИ\\n\\n'+lines.join('\\n')+'\\n\\nДобавить: /task Новая задача',menu());
+  await ctx.editMessageText('🔥 МОИ УСЛУГИ\\n\\nВыбери, что тебе нужно:', servicesMenu());
 });
 
-bot.action('clients',async ctx=>{
-  await ensureUser(ctx);
-  const r=await db('SELECT name,contact FROM clients WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 10',[ctx.from.id]);
-  const lines=r.rows.length?r.rows.map((x:any)=>`👤 ${x.name}${x.contact?' — '+x.contact:''}`):['Пока клиентов нет.'];
-  await ctx.answerCbQuery();
-  await ctx.editMessageText('👥 КЛИЕНТЫ\\n\\n'+lines.join('\\n')+'\\n\\nДобавить: /client Имя, контакт',menu());
-});
-
-bot.action('analytics',async ctx=>{
-  await ensureUser(ctx);
-  const r=await db('SELECT COUNT(*)::int transactions, COUNT(*) FILTER (WHERE type=\'income\')::int incomes, COUNT(*) FILTER (WHERE type=\'expense\')::int expenses FROM transactions WHERE telegram_id=$1',[ctx.from.id]);
-  await ctx.answerCbQuery();
-  await ctx.editMessageText(`📊 АНАЛИТИКА\\n\\nОпераций: ${r.rows[0].transactions}\\nДоходных: ${r.rows[0].incomes}\\nРасходных: ${r.rows[0].expenses}`,menu());
-});
-
-bot.action('ai',async ctx=>{
-  await ctx.answerCbQuery();
-  await ctx.reply('🤖 AI-помощник подключим следующим модулем. Он будет анализировать финансы, задачи и клиентов и выдавать конкретные действия.');
-});
-
-bot.action('settings',async ctx=>{
-  await ctx.answerCbQuery();
-  await ctx.editMessageText('⚙️ НАСТРОЙКИ\\n\\nBIZBOX v1.0\\nTelegram-first версия\\n\\nКоманды: /menu /income /expense /task /client',menu());
-});
-
-bot.catch((err,ctx)=>{ console.error('BOT ERROR',err); ctx.reply('⚠️ Произошла ошибка. Попробуй ещё раз.').catch(()=>{}); });
-
-async function main(){
-  await initDb();
-  await bot.telegram.setMyCommands([
-    {command:'menu',description:'Главное меню'},
-    {command:'income',description:'Добавить доход'},
-    {command:'expense',description:'Добавить расход'},
-    {command:'task',description:'Добавить задачу'},
-    {command:'client',description:'Добавить клиента'}
-  ]);
-  await bot.launch();
-  console.log('BIZBOX bot started');
+for (const action of Object.keys(serviceData)) {
+  bot.action(`svc_${action}`, async ctx => {
+    await ctx.answerCbQuery();
+    const data = serviceData[serviceKeyFromAction(`svc_${action}`)];
+    await ctx.editMessageText(`${data.title}\\n\\n${data.text}`, backMenu());
+  });
 }
-main().catch(err=>{ console.error(err); process.exit(1); });
-process.once('SIGINT',()=>bot.stop('SIGINT'));
-process.once('SIGTERM',()=>bot.stop('SIGTERM'));
+
+bot.action('about', async ctx => {
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(
+    '👤 ОБО МНЕ\\n\\nЕржан — мобильный видеограф, продюсер и digital-специалист из Астаны.\\n\\nСоздаю контент, сайты, Telegram-ботов и системы продвижения под конкретную задачу бизнеса.',
+    backMenu()
+  );
+});
+
+bot.action('contact', async ctx => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    '💬 Можешь написать мне напрямую или оставить заявку через бота.\\n\\nНажми «Заказать», если хочешь, чтобы я сам связался с тобой.',
+    backMenu()
+  );
+});
+
+bot.action('order', async ctx => {
+  await ctx.answerCbQuery();
+  const sessionData = ctx.session as SessionData;
+  sessionData.step = 'service';
+  sessionData.service = undefined;
+  sessionData.description = undefined;
+
+  await ctx.editMessageText(
+    '💼 ЗАКАЗАТЬ УСЛУГУ\\n\\nВыбери, что тебе нужно:',
+    servicesMenu()
+  );
+});
+
+for (const action of Object.keys(serviceData)) {
+  bot.action(`svc_${action}`, async ctx => {
+    const sessionData = ctx.session as SessionData;
+    if (sessionData.step !== 'service') return;
+
+    sessionData.service = serviceData[action].title;
+    sessionData.step = 'description';
+
+    await ctx.answerCbQuery();
+    await ctx.reply(
+      `🔥 Выбрано: ${serviceData[action].title}
+
+Теперь напиши, что именно тебе нужно.
+Например: «Нужно 10 Reels для магазина одежды, хотим снять за 2 дня».`
+    );
+  });
+}
+
+bot.on('text', async ctx => {
+  const sessionData = ctx.session as SessionData;
+
+  if (ctx.message.text.startsWith('/')) return;
+
+  if (sessionData.step === 'description') {
+    sessionData.description = ctx.message.text.trim();
+    sessionData.step = 'phone';
+
+    await ctx.reply(
+      '📱 Оставь номер телефона для связи или нажми кнопку «Пропустить».',
+      Markup.keyboard([
+        [Markup.button.contactRequest('📲 Отправить номер')],
+        ['Пропустить']
+      ]).resize().oneTime()
+    );
+    return;
+  }
+
+  if (sessionData.step === 'phone' && ctx.message.text === 'Пропустить') {
+    await saveLead(ctx, null);
+    return;
+  }
+
+  await ctx.reply('Выбери нужный раздел:', mainMenu());
+});
+
+bot.on('contact', async ctx => {
+  const sessionData = ctx.session as SessionData;
+  if (sessionData.step !== 'phone') return;
+
+  await saveLead(ctx, ctx.message.contact.phone_number);
+});
+
+async function saveLead(ctx: any, phone: string | null) {
+  const s = ctx.session as SessionData;
+  const u = ctx.from;
+
+  if (!s.service || !s.description) {
+    s.step = undefined;
+    await ctx.reply('Давай начнём заново — выбери услугу.', mainMenu());
+    return;
+  }
+
+  await db(
+    `INSERT INTO service_leads
+      (telegram_id, username, first_name, phone, service, description)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [u.id, u.username ?? null, u.first_name ?? '', phone, s.service, s.description]
+  );
+
+  await db(
+    'UPDATE service_users SET phone=COALESCE($2,phone), updated_at=NOW() WHERE telegram_id=$1',
+    [u.id, phone]
+  );
+
+  if (ADMIN_TELEGRAM_ID) {
+    const username = u.username ? `@${u.username}` : 'не указан';
+    await bot.telegram.sendMessage(
+      ADMIN_TELEGRAM_ID,
+      `🔔 НОВАЯ ЗАЯВКА
+
+👤 ${u.first_name} ${u.last_name ?? ''}
+🔗 ${username}
+🆔 ${u.id}
+📱 ${phone ?? 'не указан'}
+
+🔥 Услуга:
+${s.service}
+
+📝 Задача:
+${s.description}`
+    ).catch(err => console.error('ADMIN NOTIFY ERROR', err));
+  }
+
+  s.step = undefined;
+  s.service = undefined;
+  s.description = undefined;
+
+  await ctx.reply(
+    '✅ Заявка отправлена!
+
+Спасибо. Я получил задачу и свяжусь с тобой для уточнения деталей.',
+    Markup.removeKeyboard()
+  );
+  await ctx.reply('Если хочешь посмотреть другие услуги:', mainMenu());
+}
+
+bot.catch((err, ctx) => {
+  console.error('BOT ERROR', err);
+  ctx.reply('⚠️ Произошла ошибка. Попробуй ещё раз.').catch(() => {});
+});
+
+async function main() {
+  await initDb();
+
+  await bot.telegram.setMyCommands([
+    { command: 'start', description: 'Запустить бота' },
+    { command: 'menu', description: 'Услуги и меню' },
+    { command: 'id', description: 'Показать мой Telegram ID' }
+  ]);
+
+  await bot.launch();
+  console.log('YERZHAN SERVICES BOT started');
+}
+
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
