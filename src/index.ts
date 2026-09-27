@@ -172,7 +172,7 @@ bot.action('services', async ctx => {
 
 for (const action of Object.keys(serviceData)) {
   bot.action(`svc_${action}`, async ctx => {
-    const sessionData = ctx.session as SessionData;
+    const sessionData = (ctx as any).session as SessionData;
     const data = serviceData[action];
 
     if (sessionData.step === 'service') {
@@ -211,7 +211,7 @@ bot.action('contact', async ctx => {
 
 bot.action('order', async ctx => {
   await ctx.answerCbQuery();
-  const sessionData = ctx.session as SessionData;
+  const sessionData = (ctx as any).session as SessionData;
   sessionData.step = 'service';
   sessionData.service = undefined;
   sessionData.description = undefined;
@@ -224,7 +224,7 @@ bot.action('order', async ctx => {
 
 for (const action of Object.keys(serviceData)) {
   bot.action(`svc_${action}`, async ctx => {
-    const sessionData = ctx.session as SessionData;
+    const sessionData = (ctx as any).session as SessionData;
     if (sessionData.step !== 'service') return;
 
     sessionData.service = serviceData[action].title;
@@ -241,7 +241,7 @@ for (const action of Object.keys(serviceData)) {
 }
 
 bot.on('text', async ctx => {
-  const sessionData = ctx.session as SessionData;
+  const sessionData = (ctx as any).session as SessionData;
 
   if (ctx.message.text.startsWith('/')) return;
 
@@ -268,14 +268,14 @@ bot.on('text', async ctx => {
 });
 
 bot.on('contact', async ctx => {
-  const sessionData = ctx.session as SessionData;
+  const sessionData = (ctx as any).session as SessionData;
   if (sessionData.step !== 'phone') return;
 
   await saveLead(ctx, ctx.message.contact.phone_number);
 });
 
 async function saveLead(ctx: any, phone: string | null) {
-  const s = ctx.session as SessionData;
+  const s = (ctx as any).session as SessionData;
   const u = ctx.from;
 
   if (!s.service || !s.description) {
