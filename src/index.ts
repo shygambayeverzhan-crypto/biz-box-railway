@@ -23,6 +23,11 @@ type SessionData = {
   description?: string;
 };
 
+function getSession(ctx: any): SessionData {
+  if (!ctx.session) ctx.session = {};
+  return ctx.session as SessionData;
+}
+
 async function db(sql: string, params: any[] = []) {
   return pool.query(sql, params);
 }
@@ -96,35 +101,35 @@ const backMenu = () => Markup.inlineKeyboard([
 const serviceData: Record<string, { title: string; text: string }> = {
   reels: {
     title: '🎬 REELS / МОБИЛОГРАФИЯ',
-    text: 'Пакет из 12 Reels — 100 000 ₸. Съёмка, монтаж, цвет, звук и адаптация под соцсети.\\n\\n⚡ Разовая съёмка — от 40 000 ₸.'
+    text: 'Пакет из 12 Reels — 100 000 ₸. Съёмка, монтаж, цвет, звук и адаптация под соцсети.\n\n⚡ Разовая съёмка — от 40 000 ₸.'
   },
   smm: {
     title: '📱 SMM',
-    text: 'Стратегия, контент-план, Reels, оформление и продвижение.\\n\\n💰 Консультация по личному бренду — 25 000 ₸.\\n📦 SMM под задачу — рассчитывается после брифа.'
+    text: 'Стратегия, контент-план, Reels, оформление и продвижение.\n\n💰 Консультация по личному бренду — 25 000 ₸.\n📦 SMM под задачу — рассчитывается после брифа.'
   },
   bots: {
     title: '🤖 TELEGRAM-БОТЫ',
-    text: 'Боты для продаж, заявок, автоматизации и клиентского сервиса.\\n\\n💰 От 50 000 ₸ — зависит от функционала.'
+    text: 'Боты для продаж, заявок, автоматизации и клиентского сервиса.\n\n💰 От 50 000 ₸ — зависит от функционала.'
   },
   sites: {
     title: '🌐 СОЗДАНИЕ САЙТОВ',
-    text: 'Лендинги, сайты-визитки и веб-приложения под бизнес или личный бренд.\\n\\n💰 От 70 000 ₸.'
+    text: 'Лендинги, сайты-визитки и веб-приложения под бизнес или личный бренд.\n\n💰 От 70 000 ₸.'
   },
   target: {
     title: '🎯 ТАРГЕТ',
-    text: 'Настройка рекламы в Meta: аудитория, креативы, запуск, аналитика и оптимизация.\\n\\n💰 Настройка — 80 000 ₸.'
+    text: 'Настройка рекламы в Meta: аудитория, креативы, запуск, аналитика и оптимизация.\n\n💰 Настройка — 80 000 ₸.'
   },
   content: {
     title: '✍️ СЦЕНАРИИ / КОНТЕНТ',
-    text: 'Сценарии для Reels, TikTok, рекламы, Threads и коротких сериалов.\\n\\n💰 От 10 000 ₸.'
+    text: 'Сценарии для Reels, TikTok, рекламы, Threads и коротких сериалов.\n\n💰 От 10 000 ₸.'
   },
   prod: {
     title: '🎥 ПРОДАКШН ПОД КЛЮЧ',
-    text: 'Полный цикл: идея → сценарий → съёмка → монтаж → звук → публикация.\\n\\n💰 Стоимость — от 100 000 ₸.'
+    text: 'Полный цикл: идея → сценарий → съёмка → монтаж → звук → публикация.\n\n💰 Стоимость — от 100 000 ₸.'
   },
   full: {
     title: '💼 КОМПЛЕКСНОЕ ПРОДВИЖЕНИЕ',
-    text: 'Контент + SMM + реклама + автоматизация в одной системе.\\n\\n💰 Стоимость формируется после короткого брифа.'
+    text: 'Контент + SMM + реклама + автоматизация в одной системе.\n\n💰 Стоимость формируется после короткого брифа.'
   }
 };
 
@@ -167,12 +172,12 @@ bot.action('home', async ctx => {
 
 bot.action('services', async ctx => {
   await ctx.answerCbQuery();
-  await ctx.editMessageText('🔥 МОИ УСЛУГИ\\n\\nВыбери, что тебе нужно:', servicesMenu());
+  await ctx.editMessageText('🔥 МОИ УСЛУГИ\n\nВыбери, что тебе нужно:', servicesMenu());
 });
 
 for (const action of Object.keys(serviceData)) {
   bot.action(`svc_${action}`, async ctx => {
-    const sessionData = (ctx as any).session as SessionData;
+    const sessionData = getSession(ctx);
     const data = serviceData[action];
 
     if (sessionData.step === 'service') {
@@ -189,14 +194,14 @@ for (const action of Object.keys(serviceData)) {
     }
 
     await ctx.answerCbQuery();
-    await ctx.editMessageText(`${data.title}\\n\\n${data.text}`, backMenu());
+    await ctx.editMessageText(`${data.title}\n\n${data.text}`, backMenu());
   });
 }
 
 bot.action('about', async ctx => {
   await ctx.answerCbQuery();
   await ctx.editMessageText(
-    '👤 ОБО МНЕ\\n\\nЕржан — мобильный видеограф, продюсер и digital-специалист из Астаны.\\n\\n🎬 Контент • 🤖 Автоматизация • 📱 SMM\\n\\nInstagram: @yrzn_tg\\nПродакшн: @yer.film_prd',
+    '👤 ОБО МНЕ\n\nЕржан — мобильный видеограф, продюсер и digital-специалист из Астаны.\n\n🎬 Контент • 🤖 Автоматизация • 📱 SMM\n\nInstagram: @yrzn_tg\nПродакшн: @yer.film_prd',
     backMenu()
   );
 });
@@ -204,44 +209,27 @@ bot.action('about', async ctx => {
 bot.action('contact', async ctx => {
   await ctx.answerCbQuery();
   await ctx.reply(
-    '💬 Можешь написать мне напрямую или оставить заявку через бота.\\n\\nНажми «Заказать», если хочешь, чтобы я сам связался с тобой.',
+    '💬 Можешь написать мне напрямую или оставить заявку через бота.\n\nНажми «Заказать», если хочешь, чтобы я сам связался с тобой.',
     backMenu()
   );
 });
 
 bot.action('order', async ctx => {
   await ctx.answerCbQuery();
-  const sessionData = (ctx as any).session as SessionData;
+  const sessionData = getSession(ctx);
   sessionData.step = 'service';
   sessionData.service = undefined;
   sessionData.description = undefined;
 
   await ctx.editMessageText(
-    '💼 ЗАКАЗАТЬ УСЛУГУ\\n\\nВыбери, что тебе нужно:',
+    '💼 ЗАКАЗАТЬ УСЛУГУ\n\nВыбери, что тебе нужно:',
     servicesMenu()
   );
 });
 
-for (const action of Object.keys(serviceData)) {
-  bot.action(`svc_${action}`, async ctx => {
-    const sessionData = (ctx as any).session as SessionData;
-    if (sessionData.step !== 'service') return;
-
-    sessionData.service = serviceData[action].title;
-    sessionData.step = 'description';
-
-    await ctx.answerCbQuery();
-    await ctx.reply(
-      `🔥 Выбрано: ${serviceData[action].title}
-
-Теперь напиши, что именно тебе нужно.
-Например: «Нужно 10 Reels для магазина одежды, хотим снять за 2 дня».`
-    );
-  });
-}
 
 bot.on('text', async ctx => {
-  const sessionData = (ctx as any).session as SessionData;
+  const sessionData = getSession(ctx);
 
   if (ctx.message.text.startsWith('/')) return;
 
@@ -268,14 +256,14 @@ bot.on('text', async ctx => {
 });
 
 bot.on('contact', async ctx => {
-  const sessionData = (ctx as any).session as SessionData;
+  const sessionData = getSession(ctx);
   if (sessionData.step !== 'phone') return;
 
   await saveLead(ctx, ctx.message.contact.phone_number);
 });
 
 async function saveLead(ctx: any, phone: string | null) {
-  const s = (ctx as any).session as SessionData;
+  const s = getSession(ctx);
   const u = ctx.from;
 
   if (!s.service || !s.description) {
