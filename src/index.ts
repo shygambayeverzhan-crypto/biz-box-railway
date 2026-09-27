@@ -172,8 +172,23 @@ bot.action('services', async ctx => {
 
 for (const action of Object.keys(serviceData)) {
   bot.action(`svc_${action}`, async ctx => {
+    const sessionData = ctx.session as SessionData;
+    const data = serviceData[action];
+
+    if (sessionData.step === 'service') {
+      sessionData.service = data.title;
+      sessionData.step = 'description';
+      await ctx.answerCbQuery();
+      await ctx.reply(
+        `🔥 Выбрано: ${data.title}
+
+Теперь напиши, что именно тебе нужно.
+Например: «Нужно 10 Reels для магазина одежды, хотим снять за 2 дня».`
+      );
+      return;
+    }
+
     await ctx.answerCbQuery();
-    const data = serviceData[serviceKeyFromAction(`svc_${action}`)];
     await ctx.editMessageText(`${data.title}\\n\\n${data.text}`, backMenu());
   });
 }
