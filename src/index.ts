@@ -98,6 +98,12 @@ const backMenu = () => Markup.inlineKeyboard([
   [Markup.button.callback('⬅️ Назад', 'home')]
 ]);
 
+const socialMenu = () => Markup.inlineKeyboard([
+  [Markup.button.url('📸 @yrzn_sh', 'https://www.instagram.com/yrzn_sh/')],
+  [Markup.button.url('🎬 @yer.film_prd', 'https://www.instagram.com/yer.film_prd/')],
+  [Markup.button.callback('⬅️ Назад', 'home')]
+]);
+
 const serviceData: Record<string, { title: string; text: string }> = {
   reels: {
     title: '🎬 REELS / МОБИЛОГРАФИЯ',
@@ -201,8 +207,8 @@ for (const action of Object.keys(serviceData)) {
 bot.action('about', async ctx => {
   await ctx.answerCbQuery();
   await ctx.editMessageText(
-    '👤 ОБО МНЕ\n\nЕржан — мобильный видеограф, продюсер и digital-специалист из Астаны.\n\n🎬 Контент • 🤖 Автоматизация • 📱 SMM\n\nInstagram: @yrzn_tg\nПродакшн: @yer.film_prd',
-    backMenu()
+    '👤 ОБО МНЕ\n\nЕржан — мобильный видеограф, продюсер и digital-специалист из Астаны.\n\n🎬 Контент • 🤖 Автоматизация • 📱 SMM\n\nМои Instagram:',
+    socialMenu()
   );
 });
 
