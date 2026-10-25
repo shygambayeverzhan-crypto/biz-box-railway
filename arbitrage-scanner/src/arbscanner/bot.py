@@ -5,6 +5,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from itertools import combinations
 from typing import Any
 
 from aiogram import Bot, Dispatcher, html
@@ -17,26 +18,13 @@ from aiogram.types import BotCommand, MenuButtonCommands, Message, TelegramObjec
 
 from .calculator import Opportunity, evaluate
 from .config import Settings
-from .market_data import MarketData, SourceUnavailable
+from .market_data import MarketData
 from .store import Store
 
 log = logging.getLogger(__name__)
 MAX_ALERTS_PER_MESSAGE = 10
 BROADCAST_INTERVAL_SECONDS = 0.05  # 20 messages/second, under Telegram's free broadcast cap.
 CHAT_INTERVAL_SECONDS = 1.05  # Small margin below Telegram's 1 message/second per-chat limit.
-
-
-def friendly_api_error(error: Exception) -> str:
-    status = getattr(getattr(error, "response", None), "status_code", None)
-    if status == 429:
-        return "слишком много запросов — подожду и попробую снова"
-    if status == 403:
-        return "источник отклонил запрос"
-    if isinstance(status, int) and status >= 500:
-        return "у источника временный сбой"
-    if "timeout" in type(error).__name__.lower():
-        return "источник пока не ответил"
-    return "источник временно недоступен"
 
 
 class CommandThrottle(BaseMiddleware):
@@ -87,8 +75,8 @@ def format_signal(items: list[Opportunity]) -> str:
     if omitted:
         lines.append(f"\nЕщё связок в этом проходе: {omitted} (не показаны в сообщении).")
     lines.extend([
-        "\nИсточник: публичные стаканы Bybit Kazakhstan и Binance Global.",
-        "Данные Binance Global не подтверждают цены/доступность локального Binance Kazakhstan.",
+        "\nИсточники: публичные стаканы выбранных бирж.",
+        "Котировки — справочные; доступность API/рынков не подтверждает доступность торговли для вашего аккаунта или региона.",
         "Расчёт не гарантирует исполнение или доход. Не включены перевод активов и сетевые комиссии; "
         "обычно для арбитража нужен заранее размещённый баланс на обеих площадках.",
         f"Проверено: {datetime.fromtimestamp(now, tz=timezone.utc).strftime('%H:%M:%S UTC')}",
@@ -113,6 +101,8 @@ async def run() -> None:
     dp.message.middleware(CommandThrottle())
 
     last_scan_ok: float | None = None
+    last_scan_qualified = 0
+    last_scan_max_net: float | None = None
     source_errors: dict[str, str] = {}
     last_sent: dict[tuple[str, str, str], float] = {}
     pending_keys: set[tuple[str, str, str]] = set()
@@ -143,10 +133,9 @@ async def run() -> None:
     @dp.message(Command("help"))
     async def help_command(message: Message) -> None:
         await message.answer(
-            "Я АрбиСкан Бот. Сравниваю спотовые пары к USDT на Bybit Kazakhstan и Binance Global "
-            "и учитываю глубину стаканов вместе с заданными комиссиями.\n\n"
-            "Важно: Binance Global — отдельный источник, его цены и доступность могут отличаться "
-            "от Binance Kazakhstan. Переводы, комиссии сетей и исполнение сделки я не проверяю. "
+            "Я АрбиСкан Бот. Сравниваю спотовые пары к USDT на доступных публичных API Bybit Kazakhstan и ATAIX Kazakhstan, если у обеих есть активная пара. Учитываю глубину стаканов и модельные комиссии.\n\n"
+            "Доступность этих API не означает, что торговля на каждой площадке разрешена или доступна именно вам. "
+            "Переводы, комиссии сетей и исполнение сделки я не проверяю. "
             "Любая связка — только оценка, не обещание дохода.\n\n"
             "/start — получать сигналы\n/settings — параметры сканирования\n"
             "/status — как идут проверки\n/stop — отключить сигналы"
@@ -159,25 +148,26 @@ async def run() -> None:
             f"• Минимальная чистая разница: {settings.min_net_spread_percent:.2f}%\n"
             f"• Размер оценки: от {settings.min_notional_usdt:.2f} до {settings.max_notional_usdt:.2f} USDT\n"
             f"• Пары, активные на обеих площадках: {', '.join(active_symbols) or 'пока не нашлись'}\n"
-            f"• Комиссии в расчёте: Bybit {settings.bybit_taker_fee_percent:.3f}% + "
-            f"Binance {settings.binance_taker_fee_percent:.3f}%\n\n"
+            f"• Модель taker-комиссий: Bybit {settings.bybit_taker_fee_percent:.3f}%, "
+            f"ATAIX {settings.ataix_taker_fee_percent:.3f}%\n\n"
             "Комиссии заданы владельцем бота и могут отличаться от ваших. Параметры пока общие для всех."
         )
 
     @dp.message(Command("status"))
     async def status_command(message: Message) -> None:
-        bybit_state = source_errors.get("Bybit Kazakhstan", "на связи" if last_scan_ok else "проверяю")
-        binance_state = source_errors.get("Binance Global", "на связи" if last_scan_ok else "проверяю")
+        states = data.source_states
         scanned = "ещё не было"
         if last_scan_ok:
             scanned = datetime.fromtimestamp(last_scan_ok, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         queue_state = "есть сообщение к отправке" if not alert_queue.empty() else "свободна"
         await message.answer(
             "Я на связи — вот как идут проверки:\n"
-            f"• Bybit Kazakhstan: {bybit_state}\n• Binance Global: {binance_state}\n"
-            f"• Общих активных пар: {len(active_symbols)}\n• Последняя проверка: {scanned}\n"
+            + "\n".join(f"• {name}: {state}" for name, state in states.items()) + "\n"
+            f"• Общих активных пар: {len(active_symbols)}\n• Подключённых API: {len(data.active_venues)} из {len(states)}\n• Последняя проверка: {scanned}\n"
             f"• Рынки: {source_errors.get('market validation', 'пары проверены' if active_symbols else 'пока нет общих активных пар')}\n"
             f"• Подписчиков: {await store.count()}\n• Очередь сигналов: {queue_state}\n"
+            f"• Связок выше порога в последнем проходе: {last_scan_qualified}; "
+            f"максимум после комиссий: {f'{last_scan_max_net:.3f}%' if last_scan_max_net is not None else 'пока нет расчёта'}\n"
             f"• Отправлено: {delivery_stats['sent']}; не доставлено: {delivery_stats['failed']}; "
             f"устарело до отправки: {delivery_stats['expired']}"
         )
@@ -293,40 +283,43 @@ async def run() -> None:
         alert_queue.put_nowait(eligible)
 
     async def scan_forever() -> None:
-        nonlocal last_scan_ok
+        nonlocal last_scan_ok, last_scan_qualified, last_scan_max_net
         while True:
             started = time.monotonic()
             opportunities: list[Opportunity] = []
+            max_net: float | None = None
             for symbol in active_symbols:
                 try:
-                    bybit, binance = await data.pair(symbol)
-                    source_errors.pop("Bybit Kazakhstan", None)
-                    source_errors.pop("Binance Global", None)
+                    books = await data.books(symbol)
                     now = time.time()
-                    for buy, sell, buy_fee, sell_fee in (
-                        (bybit, binance, settings.bybit_taker_fee_percent, settings.binance_taker_fee_percent),
-                        (binance, bybit, settings.binance_taker_fee_percent, settings.bybit_taker_fee_percent),
-                    ):
-                        if now - buy.observed_at > settings.max_quote_age_seconds:
-                            continue
-                        if now - sell.observed_at > settings.max_quote_age_seconds:
-                            continue
-                        if buy.exchange_timestamp is not None and now - buy.exchange_timestamp > settings.max_quote_age_seconds:
-                            continue
-                        if abs(buy.observed_at - sell.observed_at) > settings.max_cross_exchange_skew_seconds:
-                            continue
-                        opportunity = evaluate(
-                            buy, sell, buy_fee, sell_fee,
-                            settings.max_notional_usdt, settings.min_notional_usdt, now,
-                        )
-                        if opportunity and opportunity.net_percent >= settings.min_net_spread_percent:
-                            opportunities.append(opportunity)
-                    last_scan_ok = now
-                except SourceUnavailable as exc:
-                    source_errors[exc.exchange] = friendly_api_error(exc.cause)
-                    log.warning("%s request failed for %s (%s)", exc.exchange, symbol, type(exc.cause).__name__)
+                    fees = {
+                        "Bybit Kazakhstan": settings.bybit_taker_fee_percent,
+                        "ATAIX Kazakhstan": settings.ataix_taker_fee_percent,
+                    }
+                    for left, right in combinations(books, 2):
+                        for buy, sell in ((left, right), (right, left)):
+                            if now - buy.observed_at > settings.max_quote_age_seconds or now - sell.observed_at > settings.max_quote_age_seconds:
+                                continue
+                            if buy.exchange_timestamp is not None and now - buy.exchange_timestamp > settings.max_quote_age_seconds:
+                                continue
+                            if sell.exchange_timestamp is not None and now - sell.exchange_timestamp > settings.max_quote_age_seconds:
+                                continue
+                            if abs(buy.observed_at - sell.observed_at) > settings.max_cross_exchange_skew_seconds:
+                                continue
+                            opportunity = evaluate(
+                                buy, sell, fees[buy.exchange], fees[sell.exchange],
+                                settings.max_notional_usdt, settings.min_notional_usdt, now,
+                            )
+                            if opportunity and (max_net is None or opportunity.net_percent > max_net):
+                                max_net = opportunity.net_percent
+                            if opportunity and opportunity.net_percent >= settings.min_net_spread_percent:
+                                opportunities.append(opportunity)
+                    if books:
+                        last_scan_ok = now
                 except Exception as exc:
                     log.exception("Scan failed for %s (%s)", symbol, type(exc).__name__)
+            last_scan_qualified = len(opportunities)
+            last_scan_max_net = max_net
             if opportunities:
                 await enqueue_alerts(opportunities)
             delay = max(0.1, settings.scan_interval_seconds - (time.monotonic() - started))
@@ -355,16 +348,10 @@ async def run() -> None:
             log.warning("Could not update Telegram bot profile (%s)", type(exc).__name__)
         active_symbols = await data.validate_markets(settings.symbol_list)
         for symbol, state in data.market_states.items():
-            if state != "active on both sources":
-                log.warning("Skipping %s: %s", symbol, state)
-                if state.startswith("validation error:"):
-                    source_errors["market validation"] = state
-                    for exchange in ("Bybit Kazakhstan", "Binance Global"):
-                        if exchange in state:
-                            source_errors[exchange] = "не удалось проверить рынки; попробую ещё раз"
+            log.info("Market %s available on: %s", symbol, state)
         if not active_symbols:
-            source_errors["market validation"] = "no common active spot symbols"
-            log.error("No active, matching spot USDT symbols found on both data sources")
+            source_errors["market validation"] = "нет пары из SYMBOLS, активной одновременно на Bybit.kz и ATAIX.kz"
+            log.error("No active, matching spot USDT symbols found on at least two data sources")
         else:
             source_errors.pop("market validation", None)
         sender_task = asyncio.create_task(sender_forever(), name="telegram-sender")
@@ -394,4 +381,3 @@ async def run() -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     asyncio.run(run())
-

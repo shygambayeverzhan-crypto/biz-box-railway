@@ -13,8 +13,7 @@ class Settings(BaseSettings):
     database_path: str = "./data/bot.sqlite3"
     # Bybit's regional Kazakhstan host; public endpoints do not need an API key.
     bybit_base_url: str = "https://api.bybit.kz"
-    # Binance's official public market-data-only endpoint. It represents Binance Global data.
-    binance_base_url: str = "https://data-api.binance.vision"
+    ataix_base_url: str = "https://api.ataix.kz"
     symbols: str = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT"
     scan_interval_seconds: float = Field(default=5, ge=1, le=60)
     orderbook_depth: int = Field(default=50, ge=1, le=50)
@@ -25,7 +24,7 @@ class Settings(BaseSettings):
     max_cross_exchange_skew_seconds: float = Field(default=2, ge=0.1, le=30)
     max_signal_age_seconds: float = Field(default=20, ge=2, le=300)
     bybit_taker_fee_percent: float = Field(default=0.10, ge=0, le=10)
-    binance_taker_fee_percent: float = Field(default=0.10, ge=0, le=10)
+    ataix_taker_fee_percent: float = Field(default=0.20, ge=0, le=10)
     cooldown_seconds: int = Field(default=300, ge=10, le=86400)
 
     @field_validator("symbols")
@@ -47,4 +46,3 @@ class Settings(BaseSettings):
         if self.min_notional_usdt > self.max_notional_usdt:
             raise ValueError("MIN_NOTIONAL_USDT cannot exceed MAX_NOTIONAL_USDT")
         return self
-
