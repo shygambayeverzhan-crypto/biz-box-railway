@@ -13,7 +13,7 @@ from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, TelegramObject
+from aiogram.types import BotCommand, MenuButtonCommands, Message, TelegramObject
 
 from .calculator import Opportunity, evaluate
 from .config import Settings
@@ -24,6 +24,19 @@ log = logging.getLogger(__name__)
 MAX_ALERTS_PER_MESSAGE = 10
 BROADCAST_INTERVAL_SECONDS = 0.05  # 20 messages/second, under Telegram's free broadcast cap.
 CHAT_INTERVAL_SECONDS = 1.05  # Small margin below Telegram's 1 message/second per-chat limit.
+
+
+def friendly_api_error(error: Exception) -> str:
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    if status == 429:
+        return "слишком много запросов — подожду и попробую снова"
+    if status == 403:
+        return "источник отклонил запрос"
+    if isinstance(status, int) and status >= 500:
+        return "у источника временный сбой"
+    if "timeout" in type(error).__name__.lower():
+        return "источник пока не ответил"
+    return "источник временно недоступен"
 
 
 class CommandThrottle(BaseMiddleware):
@@ -119,46 +132,54 @@ async def run() -> None:
             return
         await store.subscribe(message.from_user.id)
         await message.answer(
-            "Подписка включена. Для доставки сигналов бот сохраняет ваш Telegram ID; "
-            "команда /stop удалит его из списка.\n"
-            "Сигналы — оценка публичных котировок, не обещание прибыли.\n"
+            "Привет! Я АрбиСкан Бот 👋\n\n"
+            "Слежу за спотовыми рынками и пришлю сообщение, если найду заметное расхождение цен. "
+            "Сейчас подписка включена.\n\n"
+            "Это оценка по публичным стаканам: комиссии примерные, а перевод и исполнение я не проверяю. "
+            "Для доставки сохраняю ваш Telegram ID; остановить сообщения можно командой /stop.\n\n"
             "Команды: /help, /settings, /status, /stop"
         )
 
     @dp.message(Command("help"))
     async def help_command(message: Message) -> None:
         await message.answer(
-            "Бот сравнивает активные spot-пары USDT на публичных источниках Bybit Kazakhstan и Binance Global.\n"
-            "Расчёт использует глубину стакана и заданные комиссии. Binance Global может отличаться от "
-            "локального Binance Kazakhstan. Переводы и фактическое исполнение не проверяются.\n"
-            "/start — включить сигналы\n/settings — параметры\n/status — состояние\n/stop — удалить подписку"
+            "Я АрбиСкан Бот. Сравниваю спотовые пары к USDT на Bybit Kazakhstan и Binance Global "
+            "и учитываю глубину стаканов вместе с заданными комиссиями.\n\n"
+            "Важно: Binance Global — отдельный источник, его цены и доступность могут отличаться "
+            "от Binance Kazakhstan. Переводы, комиссии сетей и исполнение сделки я не проверяю. "
+            "Любая связка — только оценка, не обещание дохода.\n\n"
+            "/start — получать сигналы\n/settings — параметры сканирования\n"
+            "/status — как идут проверки\n/stop — отключить сигналы"
         )
 
     @dp.message(Command("settings"))
     async def settings_command(message: Message) -> None:
         await message.answer(
-            f"Минимальный оценочный чистый спред: {settings.min_net_spread_percent:.2f}%\n"
-            f"Минимальный объём оценки: {settings.min_notional_usdt:.2f} USDT\n"
-            f"Максимальная сумма покупки: {settings.max_notional_usdt:.2f} USDT\n"
-            f"Активные пары: {', '.join(active_symbols) or 'не найдены'}\n"
-            "Комиссии — настройки владельца, они могут отличаться от тарифа пользователя."
+            "Вот с какими параметрами я сейчас сканирую:\n"
+            f"• Минимальная чистая разница: {settings.min_net_spread_percent:.2f}%\n"
+            f"• Размер оценки: от {settings.min_notional_usdt:.2f} до {settings.max_notional_usdt:.2f} USDT\n"
+            f"• Пары, активные на обеих площадках: {', '.join(active_symbols) or 'пока не нашлись'}\n"
+            f"• Комиссии в расчёте: Bybit {settings.bybit_taker_fee_percent:.3f}% + "
+            f"Binance {settings.binance_taker_fee_percent:.3f}%\n\n"
+            "Комиссии заданы владельцем бота и могут отличаться от ваших. Параметры пока общие для всех."
         )
 
     @dp.message(Command("status"))
     async def status_command(message: Message) -> None:
-        bybit_state = source_errors.get("Bybit Kazakhstan", "работает" if last_scan_ok else "ожидание проверки")
-        binance_state = source_errors.get("Binance Global", "работает" if last_scan_ok else "ожидание проверки")
+        bybit_state = source_errors.get("Bybit Kazakhstan", "на связи" if last_scan_ok else "проверяю")
+        binance_state = source_errors.get("Binance Global", "на связи" if last_scan_ok else "проверяю")
         scanned = "ещё не было"
         if last_scan_ok:
             scanned = datetime.fromtimestamp(last_scan_ok, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        queue_state = "занята" if not alert_queue.empty() else "пустая"
+        queue_state = "есть сообщение к отправке" if not alert_queue.empty() else "свободна"
         await message.answer(
-            f"Bybit Kazakhstan API: {bybit_state}\nBinance Global market-data API: {binance_state}\n"
-            f"Активные общие пары: {len(active_symbols)}\nПоследний проход: {scanned}\n"
-            f"Проверка рынков: {source_errors.get('market validation', 'пройдена' if active_symbols else 'нет общих активных пар')}\n"
-            f"Подписчиков: {await store.count()}\nОчередь уведомлений: {queue_state}\n"
-            f"Доставлено: {delivery_stats['sent']}; ошибок: {delivery_stats['failed']}; "
-            f"пропущено устаревших: {delivery_stats['expired']}"
+            "Я на связи — вот как идут проверки:\n"
+            f"• Bybit Kazakhstan: {bybit_state}\n• Binance Global: {binance_state}\n"
+            f"• Общих активных пар: {len(active_symbols)}\n• Последняя проверка: {scanned}\n"
+            f"• Рынки: {source_errors.get('market validation', 'пары проверены' if active_symbols else 'пока нет общих активных пар')}\n"
+            f"• Подписчиков: {await store.count()}\n• Очередь сигналов: {queue_state}\n"
+            f"• Отправлено: {delivery_stats['sent']}; не доставлено: {delivery_stats['failed']}; "
+            f"устарело до отправки: {delivery_stats['expired']}"
         )
 
     @dp.message(Command("stop"))
@@ -166,7 +187,7 @@ async def run() -> None:
         if message.from_user is not None:
             await store.delete_subscriber(message.from_user.id)
             last_chat_delivery.pop(message.from_user.id, None)
-        await message.answer("Подписка удалена. Чтобы получать сигналы снова, отправьте /start.")
+        await message.answer("Готово, сигналы отключил. Если захотите вернуться — просто отправьте /start 🙂")
 
     async def send_one(chat_id: int, text: str, expires_at: float) -> bool | None:
         for attempt in range(2):
@@ -302,7 +323,7 @@ async def run() -> None:
                             opportunities.append(opportunity)
                     last_scan_ok = now
                 except SourceUnavailable as exc:
-                    source_errors[exc.exchange] = type(exc.cause).__name__
+                    source_errors[exc.exchange] = friendly_api_error(exc.cause)
                     log.warning("%s request failed for %s (%s)", exc.exchange, symbol, type(exc.cause).__name__)
                 except Exception as exc:
                     log.exception("Scan failed for %s (%s)", symbol, type(exc).__name__)
@@ -313,6 +334,25 @@ async def run() -> None:
 
     async def on_startup() -> None:
         nonlocal active_symbols, scanner_task, sender_task
+        try:
+            await bot.set_my_name("АрбиСкан Бот", language_code="ru")
+            await bot.set_my_description(
+                "Сканирую спотовые рынки и присылаю оценку межбиржевых ценовых расхождений. "
+                "Сигналы не гарантируют исполнение или доход.", language_code="ru"
+            )
+            await bot.set_my_short_description(
+                "Спотовый сканер ценовых расхождений. Только оценки, без торговли.", language_code="ru"
+            )
+            await bot.set_my_commands([
+                BotCommand(command="start", description="Включить сигналы"),
+                BotCommand(command="help", description="Как работает сканер"),
+                BotCommand(command="settings", description="Параметры сканирования"),
+                BotCommand(command="status", description="Состояние проверок"),
+                BotCommand(command="stop", description="Отключить сигналы"),
+            ], language_code="ru")
+            await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        except Exception as exc:
+            log.warning("Could not update Telegram bot profile (%s)", type(exc).__name__)
         active_symbols = await data.validate_markets(settings.symbol_list)
         for symbol, state in data.market_states.items():
             if state != "active on both sources":
@@ -321,7 +361,7 @@ async def run() -> None:
                     source_errors["market validation"] = state
                     for exchange in ("Bybit Kazakhstan", "Binance Global"):
                         if exchange in state:
-                            source_errors[exchange] = state
+                            source_errors[exchange] = "не удалось проверить рынки; попробую ещё раз"
         if not active_symbols:
             source_errors["market validation"] = "no common active spot symbols"
             log.error("No active, matching spot USDT symbols found on both data sources")
