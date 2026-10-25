@@ -16,6 +16,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError, Tel
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BotCommand, MenuButtonCommands, Message, TelegramObject
 
+from .ai_chat import AIChat
 from .calculator import Opportunity, evaluate
 from .config import Settings
 from .market_data import MarketData
@@ -96,6 +97,7 @@ async def run() -> None:
     store = Store(settings.database_path)
     await store.open()
     data = MarketData(settings)
+    ai_chat = AIChat(settings.openai_api_key, settings.openai_model, settings.ai_max_output_tokens)
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.message.middleware(CommandThrottle())
@@ -127,7 +129,8 @@ async def run() -> None:
             "Сейчас подписка включена.\n\n"
             "Это оценка по публичным стаканам: комиссии примерные, а перевод и исполнение я не проверяю. "
             "Для доставки сохраняю ваш Telegram ID; остановить сообщения можно командой /stop.\n\n"
-            "Команды: /help, /settings, /status, /stop"
+            "Можешь спросить меня обычным сообщением или написать /ask. "
+            "/help, /settings, /status, /stop"
         )
 
     @dp.message(Command("help"))
@@ -137,6 +140,8 @@ async def run() -> None:
             "Доступность этих API не означает, что торговля на каждой площадке разрешена или доступна именно вам. "
             "Переводы, комиссии сетей и исполнение сделки я не проверяю. "
             "Любая связка — только оценка, не обещание дохода.\n\n"
+            "Можешь задать обычный вопрос ИИ-чату или написать /ask вопрос. "
+            "Текст вопроса отправляется в OpenAI; не присылай пароли, API-ключи или личные данные.\n\n"
             "/start — получать сигналы\n/settings — параметры сканирования\n"
             "/status — как идут проверки\n/stop — отключить сигналы"
         )
@@ -177,7 +182,40 @@ async def run() -> None:
         if message.from_user is not None:
             await store.delete_subscriber(message.from_user.id)
             last_chat_delivery.pop(message.from_user.id, None)
+            ai_chat.clear_user(message.from_user.id)
         await message.answer("Готово, сигналы отключил. Если захотите вернуться — просто отправьте /start 🙂")
+
+    async def handle_ai_question(message: Message, prompt: str) -> None:
+        if message.chat.type != "private" or message.from_user is None:
+            return
+        user_id = message.from_user.id
+        if not await store.is_subscribed(user_id):
+            await message.answer("Сначала открой бота в личке и нажми /start, тогда смогу отвечать 🙂")
+            return
+        if not settings.openai_api_key:
+            await message.answer("ИИ-чат пока не подключён. Сигналы и команды /status работают отдельно.")
+            return
+        answer, error = await ai_chat.ask(
+            user_id,
+            prompt,
+            lambda: store.consume_ai_quota(
+                user_id, settings.ai_user_daily_limit, settings.ai_daily_limit
+            ),
+        )
+        await message.answer(html.quote(answer or error or "Не получилось ответить."))
+
+    @dp.message(Command("ask"))
+    async def ask_command(message: Message) -> None:
+        prompt = (message.text or "").partition(" ")[2].strip()
+        if not prompt:
+            await message.answer("Напиши вопрос после команды, например: /ask что такое спред?")
+            return
+        await handle_ai_question(message, prompt)
+
+    @dp.message()
+    async def ai_chat_message(message: Message) -> None:
+        if message.text and not message.text.startswith("/"):
+            await handle_ai_question(message, message.text)
 
     async def send_one(chat_id: int, text: str, expires_at: float) -> bool | None:
         for attempt in range(2):
@@ -341,6 +379,7 @@ async def run() -> None:
                 BotCommand(command="help", description="Как работает сканер"),
                 BotCommand(command="settings", description="Параметры сканирования"),
                 BotCommand(command="status", description="Состояние проверок"),
+                BotCommand(command="ask", description="Задать вопрос ИИ"),
                 BotCommand(command="stop", description="Отключить сигналы"),
             ], language_code="ru")
             await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
@@ -369,6 +408,7 @@ async def run() -> None:
                 except asyncio.CancelledError:
                     pass
         await data.close()
+        await ai_chat.close()
 
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
@@ -376,6 +416,7 @@ async def run() -> None:
         await dp.start_polling(bot, close_bot_session=True)
     finally:
         await data.close()
+        await ai_chat.close()
 
 
 def main() -> None:

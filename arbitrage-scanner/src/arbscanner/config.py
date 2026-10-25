@@ -11,6 +11,11 @@ class Settings(BaseSettings):
 
     bot_token: str = ""
     database_path: str = "./data/bot.sqlite3"
+    openai_api_key: str = ""
+    openai_model: str = "gpt-6-luna"
+    ai_daily_limit: int = Field(default=25, ge=0, le=10000)
+    ai_user_daily_limit: int = Field(default=5, ge=0, le=1000)
+    ai_max_output_tokens: int = Field(default=250, ge=32, le=2000)
     # Bybit's regional Kazakhstan host; public endpoints do not need an API key.
     bybit_base_url: str = "https://api.bybit.kz"
     ataix_base_url: str = "https://api.ataix.kz"
