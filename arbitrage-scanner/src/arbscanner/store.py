@@ -28,7 +28,85 @@ class Store:
                 requests INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_id, usage_day)
             )""")
+            await db.execute("""CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                symbols TEXT,
+                threshold REAL
+            )""")
+            await db.execute("""CREATE TABLE IF NOT EXISTS signal_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                buy_exchange TEXT NOT NULL,
+                sell_exchange TEXT NOT NULL,
+                buy_vwap REAL NOT NULL,
+                sell_vwap REAL NOT NULL,
+                gross_percent REAL NOT NULL,
+                net_percent REAL NOT NULL,
+                notional_usdt REAL NOT NULL,
+                observed_at REAL NOT NULL
+            )""")
             await db.commit()
+
+    async def preferences(self, user_id: int, default_symbols: list[str], default_threshold: float) -> tuple[list[str], float]:
+        async with aiosqlite.connect(self.path, timeout=10) as db:
+            cur = await db.execute("SELECT symbols, threshold FROM user_settings WHERE user_id=?", (user_id,))
+            row = await cur.fetchone()
+            if row is None:
+                return list(default_symbols), default_threshold
+            symbols = list(default_symbols) if row[0] is None else [part for part in str(row[0]).split(",") if part]
+            return symbols, float(row[1] if row[1] is not None else default_threshold)
+
+    async def set_symbols(self, user_id: int, symbols: list[str]) -> None:
+        async with aiosqlite.connect(self.path, timeout=10) as db:
+            await db.execute(
+                "INSERT INTO user_settings(user_id, symbols) VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET symbols=excluded.symbols",
+                (user_id, ",".join(dict.fromkeys(symbols))),
+            )
+            await db.commit()
+
+    async def set_threshold(self, user_id: int, threshold: float) -> None:
+        async with aiosqlite.connect(self.path, timeout=10) as db:
+            await db.execute(
+                "INSERT INTO user_settings(user_id, threshold) VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET threshold=excluded.threshold",
+                (user_id, threshold),
+            )
+            await db.commit()
+
+    async def signal_floor(self, default_threshold: float) -> float:
+        async with aiosqlite.connect(self.path, timeout=10) as db:
+            cur = await db.execute(
+                "SELECT MIN(COALESCE(us.threshold, ?)) FROM subscribers s "
+                "LEFT JOIN user_settings us ON us.user_id=s.user_id",
+                (default_threshold,),
+            )
+            row = await cur.fetchone()
+            return float(row[0]) if row and row[0] is not None else default_threshold
+
+    async def record_signals(self, items: list[dict[str, float | str]]) -> None:
+        if not items:
+            return
+        async with aiosqlite.connect(self.path, timeout=10) as db:
+            await db.executemany(
+                "INSERT INTO signal_history(symbol,buy_exchange,sell_exchange,buy_vwap,sell_vwap,"
+                "gross_percent,net_percent,notional_usdt,observed_at) "
+                "SELECT ?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM signal_history "
+                "WHERE symbol=? AND buy_exchange=? AND sell_exchange=? AND observed_at>=?)",
+                [(i["symbol"],i["buy_exchange"],i["sell_exchange"],i["buy_vwap"],i["sell_vwap"],
+                  i["gross_percent"],i["net_percent"],i["notional_usdt"],i["observed_at"],
+                  i["symbol"],i["buy_exchange"],i["sell_exchange"],float(i["observed_at"])-60.0) for i in items],
+            )
+            await db.execute("DELETE FROM signal_history WHERE id NOT IN (SELECT id FROM signal_history ORDER BY id DESC LIMIT 1000)")
+            await db.commit()
+
+    async def history(self, limit: int = 10) -> list[tuple[str, str, str, float, float, float, float, float, float]]:
+        async with aiosqlite.connect(self.path, timeout=10) as db:
+            cur = await db.execute(
+                "SELECT symbol,buy_exchange,sell_exchange,gross_percent,net_percent,notional_usdt,observed_at,buy_vwap,sell_vwap "
+                "FROM signal_history ORDER BY id DESC LIMIT ?", (limit,)
+            )
+            return await cur.fetchall()
 
     async def consume_ai_quota(self, user_id: int, user_limit: int, daily_limit: int) -> bool:
         """Atomically charge one daily AI request before sending it to the paid API."""
@@ -73,6 +151,8 @@ class Store:
         async with aiosqlite.connect(self.path, timeout=10) as db:
             await db.execute("PRAGMA busy_timeout=10000")
             await db.execute("DELETE FROM subscribers WHERE user_id=?", (user_id,))
+            await db.execute("DELETE FROM user_settings WHERE user_id=?", (user_id,))
+            await db.execute("DELETE FROM ai_usage WHERE user_id=?", (user_id,))
             await db.commit()
 
     async def subscribers(self) -> list[int]:

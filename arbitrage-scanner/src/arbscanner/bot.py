@@ -14,7 +14,10 @@ from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
-from aiogram.types import BotCommand, MenuButtonCommands, Message, TelegramObject
+from aiogram.types import (
+    BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
+    MenuButtonCommands, Message, TelegramObject,
+)
 
 from .ai_chat import AIChat
 from .calculator import Opportunity, evaluate
@@ -112,6 +115,9 @@ async def run() -> None:
     last_chat_delivery: dict[int, float] = {}
     delivery_stats = {"sent": 0, "failed": 0, "expired": 0}
     active_symbols: list[str] = []
+    settings_symbols = settings.symbol_list
+    previous_venue_health: dict[str, bool] = {name: True for name in data.source_states}
+    health_notice_tasks: set[asyncio.Task[None]] = set()
     scanner_task: asyncio.Task[None] | None = None
     sender_task: asyncio.Task[None] | None = None
 
@@ -130,7 +136,7 @@ async def run() -> None:
             "Это оценка по публичным стаканам: комиссии примерные, а перевод и исполнение я не проверяю. "
             "Для доставки сохраняю ваш Telegram ID; остановить сообщения можно командой /stop.\n\n"
             "Можешь спросить меня обычным сообщением или написать /ask. "
-            "/help, /settings, /status, /stop"
+            "/help, /settings, /status, /diagnostics, /history, /stop"
         )
 
     @dp.message(Command("help"))
@@ -143,20 +149,123 @@ async def run() -> None:
             "Можешь задать обычный вопрос ИИ-чату или написать /ask вопрос. "
             "Текст вопроса отправляется в OpenAI; не присылай пароли, API-ключи или личные данные.\n\n"
             "/start — получать сигналы\n/settings — параметры сканирования\n"
-            "/status — как идут проверки\n/stop — отключить сигналы"
+            "/status — краткий статус\n/diagnostics — почему нет связок\n"
+            "/history — последние оценки\n/stop — отключить сигналы"
         )
 
     @dp.message(Command("settings"))
     async def settings_command(message: Message) -> None:
-        await message.answer(
-            "Вот с какими параметрами я сейчас сканирую:\n"
-            f"• Минимальная чистая разница: {settings.min_net_spread_percent:.2f}%\n"
-            f"• Размер оценки: от {settings.min_notional_usdt:.2f} до {settings.max_notional_usdt:.2f} USDT\n"
-            f"• Пары, активные на обеих площадках: {', '.join(active_symbols) or 'пока не нашлись'}\n"
-            f"• Модель taker-комиссий: Bybit {settings.bybit_taker_fee_percent:.3f}%, "
-            f"ATAIX {settings.ataix_taker_fee_percent:.3f}%\n\n"
-            "Комиссии заданы владельцем бота и могут отличаться от ваших. Параметры пока общие для всех."
+        if message.from_user is None or not await store.is_subscribed(message.from_user.id):
+            await message.answer("Сначала включи бота командой /start 🙂")
+            return
+        await show_settings(message, message.from_user.id)
+
+    async def settings_view(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+        chosen, threshold = await store.preferences(
+            user_id, settings_symbols, settings.min_net_spread_percent
         )
+        rows = []
+        for offset in range(0, len(settings_symbols), 2):
+            row = []
+            for symbol in settings_symbols[offset:offset + 2]:
+                mark = "✅" if symbol in chosen else "▫️"
+                row.append(InlineKeyboardButton(text=f"{mark} {symbol}", callback_data=f"pref:pair:{symbol}"))
+            rows.append(row)
+        rows.extend([
+            [InlineKeyboardButton(text="− 0,1%", callback_data="pref:threshold:-0.1"),
+             InlineKeyboardButton(text=f"Порог {threshold:.2f}%", callback_data="pref:noop"),
+             InlineKeyboardButton(text="+ 0,1%", callback_data="pref:threshold:0.1")],
+            [InlineKeyboardButton(text="🔄 Сбросить настройки", callback_data="pref:reset")],
+        ])
+        text = (
+            "Настройки сигналов АрбиСкан Бота\n\n"
+            f"Пары: {', '.join(chosen) or 'не выбраны'}\n"
+            f"Порог чистой расчётной разницы: {threshold:.2f}%\n"
+            f"Размер оценки: {settings.min_notional_usdt:.2f}–{settings.max_notional_usdt:.2f} USDT. "
+            "Комиссии остаются оценочными. Нажми на пары или измени порог кнопками."
+        )
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def show_settings(message: Message, user_id: int) -> None:
+        text, keyboard = await settings_view(user_id)
+        await message.answer(text, reply_markup=keyboard)
+
+    @dp.callback_query(lambda query: bool(query.data and query.data.startswith("pref:")))
+    async def settings_callback(query: CallbackQuery) -> None:
+        if query.from_user is None or query.message is None:
+            await query.answer()
+            return
+        user_id = query.from_user.id
+        if not await store.is_subscribed(user_id):
+            await query.answer("Сначала отправь /start", show_alert=True)
+            return
+        action = (query.data or "").split(":")
+        chosen, threshold = await store.preferences(user_id, settings_symbols, settings.min_net_spread_percent)
+        if len(action) == 3 and action[1] == "pair" and action[2] in settings_symbols:
+            symbol = action[2]
+            chosen = [item for item in chosen if item in settings_symbols]
+            if symbol in chosen:
+                chosen.remove(symbol)
+            else:
+                chosen.append(symbol)
+            await store.set_symbols(user_id, chosen)
+            await query.answer("Пары обновлены")
+        elif len(action) == 3 and action[1] == "threshold":
+            try:
+                delta = float(action[2])
+            except ValueError:
+                delta = 0
+            threshold = min(10.0, max(0.0, round(threshold + delta, 2)))
+            await store.set_threshold(user_id, threshold)
+            await query.answer("Порог обновлён")
+        elif len(action) == 2 and action[1] == "reset":
+            await store.set_symbols(user_id, settings_symbols)
+            await store.set_threshold(user_id, settings.min_net_spread_percent)
+            await query.answer("Настройки сброшены")
+        else:
+            await query.answer()
+        text, keyboard = await settings_view(user_id)
+        await query.message.edit_text(text, reply_markup=keyboard)
+
+    @dp.message(Command("history"))
+    async def history_command(message: Message) -> None:
+        if message.from_user is None or not await store.is_subscribed(message.from_user.id):
+            await message.answer("Сначала включи бота командой /start 🙂")
+            return
+        rows = await store.history(10)
+        if not rows:
+            await message.answer("История пока пустая. Когда появятся подходящие оценки, сохраню последние здесь.")
+            return
+        lines = ["Последние расчётные сигналы (оценки):"]
+        for symbol, buy, sell, gross, net, notional, observed, buy_price, sell_price in rows:
+            stamp = datetime.fromtimestamp(observed, tz=timezone.utc).strftime("%d.%m %H:%M UTC")
+            lines.append(
+                f"\n{symbol}: {net:+.3f}% после модельных комиссий ({gross:+.3f}% до)\n"
+                f"Купить {buy} по ~{buy_price:.8g}; продать {sell} по ~{sell_price:.8g}\n"
+                f"Объём оценки ~{notional:.2f} USDT · {stamp}"
+            )
+        await message.answer("\n".join(lines))
+
+    @dp.message(Command("diagnostics"))
+    async def diagnostics_command(message: Message) -> None:
+        states = data.source_states
+        markets = data.market_states
+        lines = ["Диагностика сканера:"]
+        lines.extend(f"• {venue}: {state}" for venue, state in states.items())
+        lines.append(f"• Совпадающие активные пары: {', '.join(active_symbols) or 'нет'}")
+        if markets:
+            lines.append("• Проверка настроенных рынков:")
+            lines.extend(f"  {symbol}: {state or 'не найден'}" for symbol, state in markets.items())
+        if not active_symbols:
+            lines.append("Причина отсутствия расчётов: пока нет настроенной пары, доступной на обеих площадках.")
+        elif last_scan_max_net is None:
+            lines.append("Стаканы ещё не дали расчёт; проверь доступность API и подожди следующий проход.")
+        else:
+            lines.append(
+                f"Максимум последнего прохода: {last_scan_max_net:.3f}%, "
+                f"текущий общий порог владельца: {settings.min_net_spread_percent:.3f}%."
+            )
+        await message.answer("\n".join(lines))
 
     @dp.message(Command("status"))
     async def status_command(message: Message) -> None:
@@ -176,6 +285,43 @@ async def run() -> None:
             f"• Отправлено: {delivery_stats['sent']}; не доставлено: {delivery_stats['failed']}; "
             f"устарело до отправки: {delivery_stats['expired']}"
         )
+
+    async def notify_health_change(venue: str, online: bool) -> None:
+        text = (
+            f"🟢 {venue} снова отвечает. Проверка рынков продолжится автоматически."
+            if online else
+            f"🟠 {venue} временно не отвечает. Я продолжаю проверять другие площадки и попробую подключиться снова."
+        )
+        for user_id in await store.subscribers():
+            wait = CHAT_INTERVAL_SECONDS - (time.monotonic() - last_chat_delivery.get(user_id, 0.0))
+            if wait > 0:
+                await asyncio.sleep(wait)
+            if not await store.is_subscribed(user_id):
+                continue
+            try:
+                await bot.send_message(user_id, text)
+                last_chat_delivery[user_id] = time.monotonic()
+            except TelegramRetryAfter as exc:
+                await asyncio.sleep(min(30.0, max(0.1, float(exc.retry_after))))
+                try:
+                    if await store.is_subscribed(user_id):
+                        await bot.send_message(user_id, text)
+                        last_chat_delivery[user_id] = time.monotonic()
+                except Exception as retry_exc:
+                    log.info("Exchange status notice retry failed (%s)", type(retry_exc).__name__)
+            except TelegramForbiddenError:
+                await store.delete_subscriber(user_id)
+            except TelegramNetworkError as exc:
+                log.info("Exchange status notice failed (%s)", type(exc).__name__)
+
+    def check_source_health() -> None:
+        for venue, state in data.source_states.items():
+            online = state.startswith("на связи")
+            if online != previous_venue_health.get(venue, True):
+                previous_venue_health[venue] = online
+                task = asyncio.create_task(notify_health_change(venue, online), name=f"health-notice-{venue}")
+                health_notice_tasks.add(task)
+                task.add_done_callback(health_notice_tasks.discard)
 
     @dp.message(Command("stop"))
     async def stop_command(message: Message) -> None:
@@ -254,13 +400,21 @@ async def run() -> None:
             items = await alert_queue.get()
             try:
                 represented = sorted(items, key=lambda item: item.net_percent, reverse=True)[:MAX_ALERTS_PER_MESSAGE]
-                message_text = format_signal(items)
                 subscribers = await store.subscribers()
                 delivered = 0
                 expired = False
                 expires_at = min(item.observed_at for item in items) + settings.max_signal_age_seconds
                 for index, user_id in enumerate(subscribers):
                     if not await store.is_subscribed(user_id):
+                        continue
+                    chosen, threshold = await store.preferences(
+                        user_id, settings_symbols, settings.min_net_spread_percent
+                    )
+                    personal_items = [
+                        item for item in items
+                        if item.symbol in chosen and item.net_percent >= threshold
+                    ]
+                    if not personal_items:
                         continue
                     if time.time() >= expires_at:
                         omitted = len(subscribers) - index
@@ -277,7 +431,7 @@ async def run() -> None:
                         delivery_stats["expired"] += len(subscribers) - index
                         expired = True
                         break
-                    delivered_result = await send_one(user_id, message_text, expires_at)
+                    delivered_result = await send_one(user_id, format_signal(personal_items), expires_at)
                     if delivered_result is True:
                         delivery_stats["sent"] += 1
                         delivered += 1
@@ -304,12 +458,16 @@ async def run() -> None:
 
     async def enqueue_alerts(items: list[Opportunity]) -> None:
         now = time.time()
+        if await store.count() == 0:
+            return
+        floor = await store.signal_floor(settings.min_net_spread_percent)
         eligible = [
             item for item in items
+            if item.net_percent >= floor
             if now - last_sent.get(signal_key(item), 0) >= settings.cooldown_seconds
             and signal_key(item) not in pending_keys
         ]
-        if not eligible or await store.count() == 0:
+        if not eligible:
             return
         if alert_queue.full():
             old = alert_queue.get_nowait()
@@ -317,13 +475,27 @@ async def run() -> None:
             pending_keys.difference_update(signal_key(item) for item in old)
             log.warning("Replaced a queued alert batch with fresher market data")
         eligible = sorted(eligible, key=lambda item: item.net_percent, reverse=True)
+        await store.record_signals([{
+            "symbol": item.symbol, "buy_exchange": item.buy_exchange, "sell_exchange": item.sell_exchange,
+            "buy_vwap": item.buy_vwap, "sell_vwap": item.sell_vwap, "gross_percent": item.gross_percent,
+            "net_percent": item.net_percent, "notional_usdt": item.buy_quote, "observed_at": item.observed_at,
+        } for item in eligible])
         pending_keys.update(signal_key(item) for item in eligible)
         alert_queue.put_nowait(eligible)
 
     async def scan_forever() -> None:
         nonlocal last_scan_ok, last_scan_qualified, last_scan_max_net
+        next_catalog_check = time.monotonic() + 60.0
         while True:
             started = time.monotonic()
+            if time.monotonic() >= next_catalog_check:
+                try:
+                    active_symbols[:] = await data.validate_markets(settings_symbols)
+                    source_errors.pop("market validation", None)
+                except Exception as exc:
+                    source_errors["market validation"] = f"повторная проверка: {type(exc).__name__}"
+                next_catalog_check = time.monotonic() + 60.0
+                check_source_health()
             opportunities: list[Opportunity] = []
             max_net: float | None = None
             for symbol in active_symbols:
@@ -350,16 +522,20 @@ async def run() -> None:
                             )
                             if opportunity and (max_net is None or opportunity.net_percent > max_net):
                                 max_net = opportunity.net_percent
-                            if opportunity and opportunity.net_percent >= settings.min_net_spread_percent:
+                            if opportunity and opportunity.net_percent > 0:
                                 opportunities.append(opportunity)
+                    check_source_health()
                     if books:
                         last_scan_ok = now
                 except Exception as exc:
                     log.exception("Scan failed for %s (%s)", symbol, type(exc).__name__)
-            last_scan_qualified = len(opportunities)
+            last_scan_qualified = sum(
+                item.net_percent >= settings.min_net_spread_percent for item in opportunities
+            )
             last_scan_max_net = max_net
             if opportunities:
                 await enqueue_alerts(opportunities)
+            check_source_health()
             delay = max(0.1, settings.scan_interval_seconds - (time.monotonic() - started))
             await asyncio.sleep(delay)
 
@@ -379,13 +555,15 @@ async def run() -> None:
                 BotCommand(command="help", description="Как работает сканер"),
                 BotCommand(command="settings", description="Параметры сканирования"),
                 BotCommand(command="status", description="Состояние проверок"),
+                BotCommand(command="diagnostics", description="Почему нет связок"),
+                BotCommand(command="history", description="Последние сигналы"),
                 BotCommand(command="ask", description="Задать вопрос ИИ"),
                 BotCommand(command="stop", description="Отключить сигналы"),
             ], language_code="ru")
             await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
         except Exception as exc:
             log.warning("Could not update Telegram bot profile (%s)", type(exc).__name__)
-        active_symbols = await data.validate_markets(settings.symbol_list)
+        active_symbols = await data.validate_markets(settings_symbols)
         for symbol, state in data.market_states.items():
             log.info("Market %s available on: %s", symbol, state)
         if not active_symbols:
@@ -393,6 +571,7 @@ async def run() -> None:
             log.error("No active, matching spot USDT symbols found on at least two data sources")
         else:
             source_errors.pop("market validation", None)
+        check_source_health()
         sender_task = asyncio.create_task(sender_forever(), name="telegram-sender")
         scanner_task = asyncio.create_task(scan_forever(), name="market-scanner")
         log.info("Scanner started for %s", ",".join(active_symbols))
@@ -407,6 +586,10 @@ async def run() -> None:
                     await task
                 except asyncio.CancelledError:
                     pass
+        for task in list(health_notice_tasks):
+            task.cancel()
+        if health_notice_tasks:
+            await asyncio.gather(*health_notice_tasks, return_exceptions=True)
         await data.close()
         await ai_chat.close()
 

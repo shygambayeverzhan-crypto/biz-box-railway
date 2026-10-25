@@ -19,6 +19,8 @@ scanner -> Bybit + ATAIX spot books -> freshness/skew/liquidity checks
         -> two-direction VWAP + estimated fees -> threshold/cooldown
         -> one-slot coalescing alert queue -> paced Telegram sender -> opted-in DMs
 Telegram text /ask -> quota check -> OpenAI Responses API (store=false) -> short reply
+Telegram /settings -> per-user pair and threshold preferences -> filtered signal DM
+Telegram /diagnostics and /history -> venue health and recent saved estimates
 ```
 
 | Файл | Роль |
@@ -43,6 +45,8 @@ Telegram text /ask -> quota check -> OpenAI Responses API (store=false) -> short
 | `/help` | Кратко объясняет источники данных и границы сигнала |
 | `/settings` | Показывает активные пары и параметры расчёта |
 | `/status` | Показывает доступность API, активные рынки, очередь и счётчики доставки |
+| `/diagnostics` | Показывает состояние API, рынков и причину отсутствия расчётов |
+| `/history` | Последние 10 расчётных возможностей; хранится максимум 1000 |
 | `/ask вопрос` | Задаёт вопрос ИИ; обычный текст тоже направляется в чат |
 | `/stop` | Удаляет Telegram ID из SQLite; повторно включить можно `/start` |
 
@@ -67,6 +71,8 @@ Telegram text /ask -> quota check -> OpenAI Responses API (store=false) -> short
 - Очередь хранит один пакет; более свежие сигналы могут заменить ожидающий пакет. Через `MAX_SIGNAL_AGE_SECONDS` недоставленная часть отбрасывается и учитывается в `/status`.
 - Эти ограничения делают MVP подходящим для небольшой аудитории. Большая аудитория требует Telegram-канала как fan-out или другой архитектуры; частная рассылка не обеспечивает мгновенную доставку всем пользователям.
 - SQLite подходит для одного процесса/узла. Горизонтально масштабировать несколько экземпляров с одной SQLite-базой не следует.
+- `user_settings` хранит индивидуальный выбор пар/порога. `/settings` меняет их inline-кнопками, а отправитель фильтрует сигналы по настройкам каждого подписчика.
+- `signal_history` хранит до 1000 последних оценок. Состояние API проверяется при проходе сканера и повторной проверке каталогов каждую минуту; смена состояния отправляется подписчикам.
 - Для ответов ИИ текст пользователя передаётся в OpenAI API; ответ использует `store=false`. Полная переписка не сохраняется в SQLite, краткая история существует только в RAM процесса. SQLite содержит дневные счётчики квот. `/stop` очищает историю в RAM.
 - ИИ не получает стаканы, не рассчитывает сигналы, не открывает веб-поиск и не торгует. API usage имеет отдельную оплату и дневные ограничения: 25 вызовов на весь бот и 5 на пользователя по умолчанию; `AI_DAILY_LIMIT=0` полностью отключает запросы.
 
