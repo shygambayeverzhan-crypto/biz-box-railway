@@ -1,0 +1,11 @@
+services:
+  scanner:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - scanner-data:/app/data
+    init: true
+volumes:
+  scanner-data:
+
