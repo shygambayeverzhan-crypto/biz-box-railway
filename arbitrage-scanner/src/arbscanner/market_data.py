@@ -80,7 +80,7 @@ class MarketData:
 
     @property
     def active_venues(self) -> list[str]:
-        return sorted({venue for venues in self._markets.values() for venue in venues})
+        return sorted(name for name, state in self._source_states.items() if state.startswith("на связи"))
 
     async def _get_json(self, exchange: str, path: str, params: dict[str, Any] | None = None) -> dict[str, Any] | list[Any]:
         circuit = self._circuits[exchange]
