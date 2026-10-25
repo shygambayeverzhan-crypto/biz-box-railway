@@ -313,6 +313,8 @@ async def run() -> None:
                 await store.delete_subscriber(user_id)
             except TelegramNetworkError as exc:
                 log.info("Exchange status notice failed (%s)", type(exc).__name__)
+            except Exception as exc:
+                log.warning("Exchange status notice failed (%s)", type(exc).__name__)
 
     def check_source_health() -> None:
         for venue, state in data.source_states.items():
@@ -605,3 +607,4 @@ async def run() -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     asyncio.run(run())
+
